@@ -1,0 +1,239 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from datetime import timedelta
+
+'Connect to Spreadsheet'
+
+url1 = 'https://github.com/tylerf100/forecast_report/Indentured_BOM.xlsx'
+url2 = 'https://github.com/tylerf100/forecast_report/Production_Schedule.xlsx'
+url3 ='https://github.com/tylerf100/forecast_report/Spans.xlsx'
+
+
+Indentured_BOM = pd.read_excel(url1)
+Schedule = pd.read_excel (url2)
+Spans = pd.read_excel (url3)
+
+'Create Serial Column'
+
+Indentured_BOM.insert(0,'Row_ID',range(0,0 + len(Indentured_BOM)))
+
+'Associate Row with NHA Level'
+
+
+Indentured_BOM.insert(2,'NHA Level',Indentured_BOM["Level"]-1)
+
+
+Indentured_BOM['NHA Level']= Indentured_BOM['NHA Level'].replace(-1,np.nan)
+
+'Make Row ID and Level into List, and then merge into dictionary'
+
+Row_ID_List = Indentured_BOM['Row_ID'].tolist()
+
+Level_List = Indentured_BOM['Level'].tolist()
+
+res = dict(zip(Row_ID_List,Level_List))
+
+'Create NHA Level List'
+
+NHA_Level_List = Indentured_BOM['NHA Level'].tolist()
+
+'Create loop that finds NHA Row ID for current level.  The loop starts at level 1 Row ID. A dictionary is created containing Current Part Level, and Row ID.'
+'the loop knocks values/elemenents out of the dictionary until the largest Row ID with the current level is returned for that particular row ID'
+
+lowest_id = min(Indentured_BOM['Row_ID'])
+highest_id =max(Indentured_BOM['Row_ID'])+1
+
+
+NHA_Row_List = [] 
+counter = 1
+while counter <  highest_id:
+    
+    parent_level = Indentured_BOM['NHA Level'].iloc[counter]
+
+    for x in range (counter,highest_id):
+        res.pop(x)
+    resa =  {key:val for key, val in res.items() if val == parent_level}
+    NHA_Serial_ID = list(resa.keys())[-1]
+    res = dict(zip(Row_ID_List,Level_List))
+    NHA_Row_List.append(NHA_Serial_ID)
+    counter = counter + 1
+NHA_Row_List.insert(0,np.NAN)
+
+Indentured_BOM.insert(2,'NHA ID',NHA_Row_List)
+
+
+
+'establish relationship to current level part qty to NHA level part qty, and multiple NHA Qty * current Qty for total parts needed'
+
+
+
+Row_ID_Qty = Indentured_BOM[['Row_ID','Qty']]
+
+Serial_ID_Qty = Row_ID_Qty.rename(columns = {'Row_ID':'NHA ID','Qty':'NHA Qty'})
+
+Indentured_BOM=Indentured_BOM.merge(Serial_ID_Qty,on = 'NHA ID',how='left')
+
+Indentured_BOM['Total Detail Qty'] = Indentured_BOM['NHA Qty'] * Indentured_BOM['Qty']
+
+'merge tables Indentured BOM with Spans on Part Number '
+
+bom_span = Indentured_BOM.merge(Spans[['Part Number','Assembly Span','Supplier Lead Time','Processing Time']],on ='Part Number', how='left')
+
+
+'add new columns for span calculations Production Start,PO Placement,NRD,MND'
+
+bom_span['Production Start']=np.NAN
+bom_span['PO Placement']=np.NAN
+bom_span['NRD']=np.NAN
+bom_span['MND']=np.NAN
+
+'Select Unit for Forecast, can be updated to select multiple from list?'
+
+Unit_List = Schedule['Unit'].tolist()
+
+
+container = []
+
+count = 0
+for x in Unit_List:
+    t=Unit_List[count]
+    print(t)
+    t = bom_span          
+    'Keep Date Only from Schedule. Create dictionary for Schedule in order to get MND Date for selected Unit'
+    
+    Schedule['Delivery Date'] = Schedule['Delivery Date']
+
+
+    Schedule_Qty_List = Schedule['Unit'].tolist()
+
+    Delivery_Date_List = Schedule['Delivery Date'].tolist()
+
+    schedule_dict = dict(zip(Schedule_Qty_List,Delivery_Date_List))
+
+
+    MND_Start=schedule_dict.get(x)
+
+    t['Unit']=x
+    
+    'Create Spans for Level 0 part'
+
+    'calculate level 0 MND'
+    t['MND'].where(~(t.Level == 0), other=MND_Start, inplace=True)
+
+    'calculate level 0 NRD'
+
+    level_0_grpt =int((t.loc[t['Level'] == 0]['Processing Time'].values))
+
+
+    NRD_Start = (MND_Start - timedelta(days=level_0_grpt))
+
+    t['NRD'].where(~(t.Level == 0), other=NRD_Start, inplace=True)
+
+    'calculate level 0 PO Placement Span'
+
+    if((t.loc[t['Level'] == 0]['Material Type'].values))== "MAKE":
+         level_0_PRCH = 'Nan'
+         level_0_MAKE_Span =int((t.loc[t['Level'] == 0]['Assembly Span'].values))
+         level_0_MAKE = NRD_Start - timedelta(days=level_0_MAKE_Span)
+    else:
+        level_0_MAKE = 'Nan'
+        level_0_PRCH_Span =int((t.loc[t['Level'] == 0]['Supplier Lead Time'].values))
+        level_0_PRCH = NRD_Start - timedelta(days=level_0_PRCH_Span)
+
+    t['PO Placement'].where(~(t.Level == 0), other=level_0_PRCH, inplace=True)
+    t['Production Start'].where(~(t.Level == 0), other=level_0_MAKE, inplace=True)
+
+
+    #####################
+    'create loop to calculate spans for other levels'
+
+    currentlevel_NHA_ID_list = []
+
+    currentlevel_NHA_Type_list = []
+
+    NHA_MND_Start_list = []
+
+    level_other_grpt_list =[]
+
+    NRD_Start_list=[]
+
+    level_other_PRCH_list=[]
+
+    level_other_PRCH_Span_list=[]
+
+    level_other_MAKE_list=[]
+
+    level_other_MAKE_Span_list=[]
+
+    cal_counter = 1
+    while cal_counter <  highest_id:
+
+
+        currentlevel_NHA_ID_list.append(int((t.loc[t['Row_ID'] == cal_counter]['NHA ID'].values)))
+        'determine if NHA is MAKE or BUY'
+
+        currentlevel_NHA_ID = currentlevel_NHA_ID_list[cal_counter - 1]
+
+
+        currentlevel_NHA_Type_list.append((t.loc[t['Row_ID'] == currentlevel_NHA_ID]['Material Type'].values))
+
+        currentlevel_NHA_Type = currentlevel_NHA_Type_list[cal_counter - 1]
+
+        if currentlevel_NHA_Type == 'MAKE':
+            NHA_MND_Start_list.append((t.loc[t['Row_ID'] == currentlevel_NHA_ID]['Production Start'].values))###
+        else:
+            NHA_MND_Start_list.append((t.loc[t['Row_ID'] == currentlevel_NHA_ID]['PO Placement'].values))###
+
+        NHA_MND_Start=NHA_MND_Start_list[cal_counter - 1]
+
+        t['MND'].where(~(t.Row_ID == cal_counter), other=NHA_MND_Start, inplace=True)###
+
+        'calculate other level NRD'
+
+        level_other_grpt_list.append(int((t.loc[t['Row_ID'] == cal_counter]['Processing Time'].values)))
+
+        level_other_grpt=level_other_grpt_list[cal_counter - 1]
+        NRD_Start_list.append (NHA_MND_Start - timedelta(days=level_other_grpt))
+        NRD_Start=NRD_Start_list[cal_counter - 1]
+        t['NRD'].where(~(t.Row_ID == cal_counter), other=NRD_Start, inplace=True)
+
+        'calculate other level PO Placement'
+
+        if((t.loc[t['Row_ID'] == cal_counter]['Material Type'].values))== "BUY":
+            level_other_PRCH_Span_list.append(int((t.loc[t['Row_ID'] == cal_counter]['Supplier Lead Time'].values)))
+            level_other_PRCH_Span=level_other_PRCH_Span_list[cal_counter - 1]
+            level_other_PRCH_list.append(NRD_Start - timedelta(days=level_other_PRCH_Span))
+
+        else:
+             level_other_PRCH_list.append(np.NAN)
+             level_other_PRCH_Span_list.append(np.NAN)
+             level_other_PRCH_Span=level_other_PRCH_Span_list[cal_counter - 1]
+
+        level_other_PRCH=level_other_PRCH_list[cal_counter - 1]
+
+        t['PO Placement'].where(~(t.Row_ID == cal_counter), other=level_other_PRCH_list[cal_counter - 1], inplace=True)
+
+        'calculate level other Production Span'
+
+        if((t.loc[t['Row_ID'] == cal_counter]['Material Type'].values))== "BUY":
+            level_other_MAKE_list.append(np.NAN)
+            level_other_MAKE_Span_list.append(np.NAN)
+            level_other_MAKE_Span=level_other_MAKE_Span_list[cal_counter - 1]
+        else:
+            level_other_MAKE_Span_list.append(int((t.loc[t['Row_ID'] == cal_counter]['Assembly Span'].values)))
+            level_other_MAKE_Span=level_other_MAKE_Span_list[cal_counter - 1]
+            level_other_MAKE_list.append(NRD_Start - timedelta(days=level_other_MAKE_Span))
+
+
+        level_other_MAKE=level_other_MAKE_list[cal_counter - 1]
+
+        t['Production Start'].where(~(t.Row_ID == cal_counter), other=level_other_MAKE, inplace=True)
+
+        cal_counter = cal_counter+1
+    container.append(t)
+    print(container)
+    count = count + 1
+print("finished")
+
+df = pd.concat(container)
